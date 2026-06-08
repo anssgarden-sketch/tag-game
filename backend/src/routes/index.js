@@ -5,5 +5,6 @@ router.get('/status', (req, res) => {
 });
 
 router.use('/auth', require('./auth'));
+router.use('/character', require('./character'));
 
 module.exports = router;
