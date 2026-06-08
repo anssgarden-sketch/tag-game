@@ -1,0 +1,39 @@
+{
+  "name": "Shino",
+  "city_id": "5fc290fb-fac2-430c-b47f-575b5f116f13",
+  "profession_id": "7864fa35-b20b-434e-b2a1-cd5c96f4a07e",
+  "assassination_skills": [
+    "725eb1bb-475f-4722-ab47-b6529404d56a",
+    "062a40cd-e69f-4347-9a34-c06b11174503",
+    "c876137e-5260-44c0-9c9b-839a80711475"
+  ],
+  "defensive_skills": [
+    "725eb1bb-475f-4722-ab47-b6529404d56a",
+    "883215ce-6bba-40b1-8271-b77313a82ae2",
+    "6324fd8f-58ee-42d7-8975-110513d4cfd5",
+    "ab992194-dcce-47f4-99f5-b7dd23d7928f",
+    "ea6a4386-42e5-4944-a379-1b8f8a04227f",
+    "f604fc2b-393b-44ca-8f77-cf00f5a78d0c",
+    "4c924849-a349-4de5-8a0f-773b76679da6",
+    "85b603f0-7ed0-4280-a0e8-87c492f90ba5",
+    "8c487771-a249-4d04-86cc-d0d07d32e991",
+    "1e5811d8-79bb-4694-8377-7b41f01067df"
+  ],
+  "intel_skills": [
+    "9fd00dc0-b553-4b79-bc3d-444f57a120a7",
+    "0b5f68c2-5a1c-4817-95c3-17ff6fff726a",
+    "65c892e2-e55d-4acd-975d-a40d3a18ff17"
+  ],
+  "counter_intel_skills": [
+    "9fd00dc0-b553-4b79-bc3d-444f57a120a7",
+    "b43b4f7b-e099-4193-937d-6e2322ca6365",
+    "9962a26e-f16a-49e8-97d6-9a1261e9f537",
+    "c53432da-2a48-4f4c-a666-bbd261ecd22e",
+    "7bdb12e0-afa7-455f-b04d-a3e42ecf7850",
+    "6a897fc0-6491-465b-ac52-772db685db72",
+    "ec2d2606-fb30-49b0-8e23-f610c0679ced",
+    "8eeae46a-e191-41d3-85ab-848c3ac81069",
+    "85d1e819-db9a-4dae-9ab2-c316661e5caf",
+    "7958c5f6-a371-434e-a570-905be966c2b1"
+  ]
+}
