@@ -1,10 +1,22 @@
+You are absolutely right — I misread our own design. Let me correct this:
+The rule we designed:
+
+Assassination and Defensive draw from the same pool — duplicates between them are allowed and expected
+Intel and Counter-Intel draw from the same pool — duplicates between them are allowed and expected
+Duplicates within the same pool are not allowed (can't pick Sniper Rifle twice in Assassination)
+
+So the validation in the character controller is wrong. Let me fix it:
+bashcat > /workspaces/tag-game/backend/src/controllers/characterController.js << 'EOF'
 const supabase = require('../services/supabase');
 
-// GET /api/character/creation-data
-// Returns all data needed to populate the character creation screen
+function generateSwissBankNumber(handle) {
+  const digits = Math.floor(1000 + Math.random() * 9000);
+  const letters = handle.substring(0, 4).toUpperCase().padEnd(4, 'X');
+  return `SB-${digits}-${letters}`;
+}
+
 async function getCreationData(req, res) {
   try {
-    // Fetch cities, professions, and skills in parallel
     const [citiesRes, professionsRes, skillsRes] = await Promise.all([
       supabase.from('cities').select('id, name, country, continent').order('name'),
       supabase.from('professions').select('id, name, description, credits_per_week, ap_modifier, schedule_type').order('name'),
@@ -15,11 +27,10 @@ async function getCreationData(req, res) {
     if (professionsRes.error) throw professionsRes.error;
     if (skillsRes.error) throw skillsRes.error;
 
-    // Split skills into their two pools
-    const assassinationDefensive = skillsRes.data.filter(s => 
+    const assassinationDefensive = skillsRes.data.filter(s =>
       s.category === 'assassination'
     );
-    const intelCounterIntel = skillsRes.data.filter(s => 
+    const intelCounterIntel = skillsRes.data.filter(s =>
       s.category === 'intel'
     );
 
@@ -44,7 +55,6 @@ async function getCreationData(req, res) {
   }
 }
 
-// POST /api/character/create
 async function createCharacter(req, res) {
   try {
     const account_id = req.account.account_id;
@@ -53,59 +63,73 @@ async function createCharacter(req, res) {
       name,
       city_id,
       profession_id,
-      assassination_skills, // array of 3 skill IDs
-      defensive_skills,     // array of 10 skill IDs
-      intel_skills,         // array of 3 skill IDs
-      counter_intel_skills  // array of 10 skill IDs
+      assassination_skills,
+      defensive_skills,
+      intel_skills,
+      counter_intel_skills
     } = req.body;
 
-    // --- Validate inputs ---
+    // Validate inputs
     if (!name || !city_id || !profession_id) {
-      return res.status(400).json({ 
-        error: 'Name, city and profession are required' 
+      return res.status(400).json({
+        error: 'Name, city and profession are required'
       });
     }
 
     if (!name.match(/^[a-zA-Z0-9 ]{2,30}$/)) {
-      return res.status(400).json({ 
-        error: 'Name must be 2-30 characters, letters and numbers only' 
+      return res.status(400).json({
+        error: 'Name must be 2-30 characters, letters and numbers only'
       });
     }
 
-    // Validate skill arrays
+    // Validate skill slot counts
     if (!assassination_skills || assassination_skills.length !== 3) {
-      return res.status(400).json({ 
-        error: 'You must select exactly 3 Assassination skills' 
+      return res.status(400).json({
+        error: 'You must select exactly 3 Assassination skills'
       });
     }
     if (!defensive_skills || defensive_skills.length !== 10) {
-      return res.status(400).json({ 
-        error: 'You must select exactly 10 Defensive skills' 
+      return res.status(400).json({
+        error: 'You must select exactly 10 Defensive skills'
       });
     }
     if (!intel_skills || intel_skills.length !== 3) {
-      return res.status(400).json({ 
-        error: 'You must select exactly 3 Intel skills' 
+      return res.status(400).json({
+        error: 'You must select exactly 3 Intel skills'
       });
     }
     if (!counter_intel_skills || counter_intel_skills.length !== 10) {
-      return res.status(400).json({ 
-        error: 'You must select exactly 10 Counter-Intel skills' 
+      return res.status(400).json({
+        error: 'You must select exactly 10 Counter-Intel skills'
       });
     }
 
-    // Check no duplicate skills within same pool
-    const allSkills = [
-      ...assassination_skills,
-      ...defensive_skills,
-      ...intel_skills,
-      ...counter_intel_skills
-    ];
+    // Validate no duplicates WITHIN each pool only
+    const assassinationSet = new Set(assassination_skills);
+    if (assassinationSet.size !== assassination_skills.length) {
+      return res.status(400).json({
+        error: 'Duplicate skills within Assassination pool'
+      });
+    }
 
-    const uniqueCheck = new Set(allSkills);
-    if (uniqueCheck.size !== allSkills.length) {
-      return res.status(400).json({ 
-        error: 'Duplicate skills detected in your selection' 
+    const defensiveSet = new Set(defensive_skills);
+    if (defensiveSet.size !== defensive_skills.length) {
+      return res.status(400).json({
+        error: 'Duplicate skills within Defensive pool'
+      });
+    }
+
+    const intelSet = new Set(intel_skills);
+    if (intelSet.size !== intel_skills.length) {
+      return res.status(400).json({
+        error: 'Duplicate skills within Intel pool'
+      });
+    }
+
+    const counterIntelSet = new Set(counter_intel_skills);
+    if (counterIntelSet.size !== counter_intel_skills.length) {
+      return res.status(400).json({
+        error: 'Duplicate skills within Counter-Intel pool'
       });
     }
 
@@ -118,15 +142,15 @@ async function createCharacter(req, res) {
       .single();
 
     if (existingChar) {
-      return res.status(400).json({ 
-        error: 'You already have a living character' 
+      return res.status(400).json({
+        error: 'You already have a living character'
       });
     }
 
     // Validate profession exists
     const { data: profession, error: profError } = await supabase
       .from('professions')
-      .select('id, ap_modifier, credits_per_week')
+      .select('id, ap_modifier, credits_per_week, name')
       .eq('id', profession_id)
       .single();
 
@@ -164,7 +188,7 @@ async function createCharacter(req, res) {
     const base_ap = parseInt(baseApRow?.value || '4');
     const max_ap = base_ap + profession.ap_modifier;
 
-    // --- Create character ---
+    // Create character
     const { data: character, error: charError } = await supabase
       .from('characters')
       .insert({
@@ -188,7 +212,7 @@ async function createCharacter(req, res) {
       return res.status(500).json({ error: 'Failed to create character' });
     }
 
-    // --- Create action points record ---
+    // Create action points record
     const { error: apError } = await supabase
       .from('action_points')
       .insert({
@@ -203,7 +227,7 @@ async function createCharacter(req, res) {
       return res.status(500).json({ error: 'Failed to create action points' });
     }
 
-    // --- Save all skill selections ---
+    // Save all skill selections
     const skillInserts = [
       ...assassination_skills.map(skill_id => ({
         character_id: character.id,
@@ -236,7 +260,6 @@ async function createCharacter(req, res) {
       return res.status(500).json({ error: 'Failed to save skill selections' });
     }
 
-    // --- Return complete character profile ---
     return res.status(201).json({
       message: 'Character created successfully',
       character: {
@@ -269,8 +292,6 @@ async function createCharacter(req, res) {
   }
 }
 
-// GET /api/character/me
-// Returns the current living character for the logged-in account
 async function getMyCharacter(req, res) {
   try {
     const account_id = req.account.account_id;
@@ -289,7 +310,7 @@ async function getMyCharacter(req, res) {
       .single();
 
     if (error || !character) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         error: 'No living character found',
         needs_character_creation: true
       });
