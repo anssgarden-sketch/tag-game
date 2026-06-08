@@ -1,19 +1,4 @@
-You are absolutely right — I misread our own design. Let me correct this:
-The rule we designed:
-
-Assassination and Defensive draw from the same pool — duplicates between them are allowed and expected
-Intel and Counter-Intel draw from the same pool — duplicates between them are allowed and expected
-Duplicates within the same pool are not allowed (can't pick Sniper Rifle twice in Assassination)
-
-So the validation in the character controller is wrong. Let me fix it:
-bashcat > /workspaces/tag-game/backend/src/controllers/characterController.js << 'EOF'
 const supabase = require('../services/supabase');
-
-function generateSwissBankNumber(handle) {
-  const digits = Math.floor(1000 + Math.random() * 9000);
-  const letters = handle.substring(0, 4).toUpperCase().padEnd(4, 'X');
-  return `SB-${digits}-${letters}`;
-}
 
 async function getCreationData(req, res) {
   try {
@@ -27,12 +12,8 @@ async function getCreationData(req, res) {
     if (professionsRes.error) throw professionsRes.error;
     if (skillsRes.error) throw skillsRes.error;
 
-    const assassinationDefensive = skillsRes.data.filter(s =>
-      s.category === 'assassination'
-    );
-    const intelCounterIntel = skillsRes.data.filter(s =>
-      s.category === 'intel'
-    );
+    const assassinationDefensive = skillsRes.data.filter(s => s.category === 'assassination');
+    const intelCounterIntel = skillsRes.data.filter(s => s.category === 'intel');
 
     return res.json({
       cities: citiesRes.data,
@@ -48,7 +29,6 @@ async function getCreationData(req, res) {
         counter_intel_slots: 10
       }
     });
-
   } catch (err) {
     console.error('Creation data error:', err);
     return res.status(500).json({ error: 'Failed to load creation data' });
@@ -58,96 +38,56 @@ async function getCreationData(req, res) {
 async function createCharacter(req, res) {
   try {
     const account_id = req.account.account_id;
+    const { name, city_id, profession_id, assassination_skills, defensive_skills, intel_skills, counter_intel_skills } = req.body;
 
-    const {
-      name,
-      city_id,
-      profession_id,
-      assassination_skills,
-      defensive_skills,
-      intel_skills,
-      counter_intel_skills
-    } = req.body;
-
-    // Validate inputs
     if (!name || !city_id || !profession_id) {
-      return res.status(400).json({
-        error: 'Name, city and profession are required'
-      });
+      return res.status(400).json({ error: 'Name, city and profession are required' });
     }
 
     if (!name.match(/^[a-zA-Z0-9 ]{2,30}$/)) {
-      return res.status(400).json({
-        error: 'Name must be 2-30 characters, letters and numbers only'
-      });
+      return res.status(400).json({ error: 'Name must be 2-30 characters, letters and numbers only' });
     }
 
-    // Validate skill slot counts
     if (!assassination_skills || assassination_skills.length !== 3) {
-      return res.status(400).json({
-        error: 'You must select exactly 3 Assassination skills'
-      });
+      return res.status(400).json({ error: 'You must select exactly 3 Assassination skills' });
     }
     if (!defensive_skills || defensive_skills.length !== 10) {
-      return res.status(400).json({
-        error: 'You must select exactly 10 Defensive skills'
-      });
+      return res.status(400).json({ error: 'You must select exactly 10 Defensive skills' });
     }
     if (!intel_skills || intel_skills.length !== 3) {
-      return res.status(400).json({
-        error: 'You must select exactly 3 Intel skills'
-      });
+      return res.status(400).json({ error: 'You must select exactly 3 Intel skills' });
     }
     if (!counter_intel_skills || counter_intel_skills.length !== 10) {
-      return res.status(400).json({
-        error: 'You must select exactly 10 Counter-Intel skills'
-      });
+      return res.status(400).json({ error: 'You must select exactly 10 Counter-Intel skills' });
     }
 
-    // Validate no duplicates WITHIN each pool only
-    const assassinationSet = new Set(assassination_skills);
-    if (assassinationSet.size !== assassination_skills.length) {
-      return res.status(400).json({
-        error: 'Duplicate skills within Assassination pool'
-      });
+    // No duplicates WITHIN each pool only
+    if (new Set(assassination_skills).size !== assassination_skills.length) {
+      return res.status(400).json({ error: 'Duplicate skills within Assassination pool' });
+    }
+    if (new Set(defensive_skills).size !== defensive_skills.length) {
+      return res.status(400).json({ error: 'Duplicate skills within Defensive pool' });
+    }
+    if (new Set(intel_skills).size !== intel_skills.length) {
+      return res.status(400).json({ error: 'Duplicate skills within Intel pool' });
+    }
+    if (new Set(counter_intel_skills).size !== counter_intel_skills.length) {
+      return res.status(400).json({ error: 'Duplicate skills within Counter-Intel pool' });
     }
 
-    const defensiveSet = new Set(defensive_skills);
-    if (defensiveSet.size !== defensive_skills.length) {
-      return res.status(400).json({
-        error: 'Duplicate skills within Defensive pool'
-      });
-    }
-
-    const intelSet = new Set(intel_skills);
-    if (intelSet.size !== intel_skills.length) {
-      return res.status(400).json({
-        error: 'Duplicate skills within Intel pool'
-      });
-    }
-
-    const counterIntelSet = new Set(counter_intel_skills);
-    if (counterIntelSet.size !== counter_intel_skills.length) {
-      return res.status(400).json({
-        error: 'Duplicate skills within Counter-Intel pool'
-      });
-    }
-
-    // Check account does not already have a living character
+    // Check no existing living character
     const { data: existingChar } = await supabase
       .from('characters')
-      .select('id, is_alive')
+      .select('id')
       .eq('account_id', account_id)
       .eq('is_alive', true)
       .single();
 
     if (existingChar) {
-      return res.status(400).json({
-        error: 'You already have a living character'
-      });
+      return res.status(400).json({ error: 'You already have a living character' });
     }
 
-    // Validate profession exists
+    // Validate profession
     const { data: profession, error: profError } = await supabase
       .from('professions')
       .select('id, ap_modifier, credits_per_week, name')
@@ -158,7 +98,7 @@ async function createCharacter(req, res) {
       return res.status(400).json({ error: 'Invalid profession' });
     }
 
-    // Validate city exists
+    // Validate city
     const { data: city, error: cityError } = await supabase
       .from('cities')
       .select('id, name')
@@ -169,22 +109,11 @@ async function createCharacter(req, res) {
       return res.status(400).json({ error: 'Invalid city' });
     }
 
-    // Get starting credits from game config
-    const { data: configRow } = await supabase
-      .from('game_config')
-      .select('value')
-      .eq('key', 'starting_credits')
-      .single();
-
+    // Get config values
+    const { data: configRow } = await supabase.from('game_config').select('value').eq('key', 'starting_credits').single();
     const starting_credits = parseInt(configRow?.value || '500');
 
-    // Get base AP from game config
-    const { data: baseApRow } = await supabase
-      .from('game_config')
-      .select('value')
-      .eq('key', 'base_ap')
-      .single();
-
+    const { data: baseApRow } = await supabase.from('game_config').select('value').eq('key', 'base_ap').single();
     const base_ap = parseInt(baseApRow?.value || '4');
     const max_ap = base_ap + profession.ap_modifier;
 
@@ -212,7 +141,7 @@ async function createCharacter(req, res) {
       return res.status(500).json({ error: 'Failed to create character' });
     }
 
-    // Create action points record
+    // Create action points
     const { error: apError } = await supabase
       .from('action_points')
       .insert({
@@ -227,33 +156,15 @@ async function createCharacter(req, res) {
       return res.status(500).json({ error: 'Failed to create action points' });
     }
 
-    // Save all skill selections
+    // Save skill selections
     const skillInserts = [
-      ...assassination_skills.map(skill_id => ({
-        character_id: character.id,
-        skill_id,
-        pool: 'assassination'
-      })),
-      ...defensive_skills.map(skill_id => ({
-        character_id: character.id,
-        skill_id,
-        pool: 'defensive'
-      })),
-      ...intel_skills.map(skill_id => ({
-        character_id: character.id,
-        skill_id,
-        pool: 'intel'
-      })),
-      ...counter_intel_skills.map(skill_id => ({
-        character_id: character.id,
-        skill_id,
-        pool: 'counter_intel'
-      }))
+      ...assassination_skills.map(skill_id => ({ character_id: character.id, skill_id, pool: 'assassination' })),
+      ...defensive_skills.map(skill_id => ({ character_id: character.id, skill_id, pool: 'defensive' })),
+      ...intel_skills.map(skill_id => ({ character_id: character.id, skill_id, pool: 'intel' })),
+      ...counter_intel_skills.map(skill_id => ({ character_id: character.id, skill_id, pool: 'counter_intel' }))
     ];
 
-    const { error: skillsError } = await supabase
-      .from('character_skills')
-      .insert(skillInserts);
+    const { error: skillsError } = await supabase.from('character_skills').insert(skillInserts);
 
     if (skillsError) {
       console.error('Skills save error:', skillsError);
