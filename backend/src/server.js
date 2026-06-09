@@ -24,6 +24,10 @@ app.get('/health', (req, res) => {
 // Routes
 app.use('/api', require('./routes/index'));
 
+// Start scheduled jobs
+const { startApRegenJob } = require('./jobs/apRegen');
+startApRegenJob();
+
 // Start server
 app.listen(PORT, () => {
   console.log(`TAG server running on port ${PORT}`);

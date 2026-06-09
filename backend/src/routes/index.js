@@ -6,5 +6,6 @@ router.get('/status', (req, res) => {
 
 router.use('/auth', require('./auth'));
 router.use('/character', require('./character'));
+router.use('/test', require('./test'));
 
 module.exports = router;
