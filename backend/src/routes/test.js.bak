@@ -3,7 +3,7 @@ const supabase = require('../services/supabase');
 const { runApRegen, expireTags } = require('../jobs/apRegen');
 const authMiddleware = require('../middleware/auth');
 
-// Trigger AP regen manually
+// Manually trigger AP regen -- for testing only
 router.post('/trigger-ap-regen', async (req, res) => {
   await runApRegen();
   await expireTags();
@@ -14,6 +14,7 @@ router.post('/trigger-ap-regen', async (req, res) => {
 router.post('/drain-ap', authMiddleware, async (req, res) => {
   try {
     const account_id = req.account.account_id;
+
     const { data: character } = await supabase
       .from('characters')
       .select('id')
@@ -31,48 +32,21 @@ router.post('/drain-ap', authMiddleware, async (req, res) => {
       .eq('character_id', character.id)
       .single();
 
+    // Drain by 2
     const newAp = Math.max(0, ap.current_ap - 2);
+
     await supabase
       .from('action_points')
       .update({ current_ap: newAp })
       .eq('id', ap.id);
 
-    res.json({
-      message: 'AP drained',
+    res.json({ 
+      message: `AP drained`,
       before: ap.current_ap,
       after: newAp,
       max: ap.max_ap
     });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
-// Top up credits for testing
-router.post('/topup-credits', authMiddleware, async (req, res) => {
-  try {
-    const account_id = req.account.account_id;
-    const { data: character } = await supabase
-      .from('characters')
-      .select('id, credits')
-      .eq('account_id', account_id)
-      .eq('is_alive', true)
-      .single();
-
-    if (!character) {
-      return res.status(404).json({ error: 'No living character' });
-    }
-
-    await supabase
-      .from('characters')
-      .update({ credits: character.credits + 2000 })
-      .eq('id', character.id);
-
-    res.json({
-      message: 'Credits topped up',
-      before: character.credits,
-      after: character.credits + 2000
-    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
