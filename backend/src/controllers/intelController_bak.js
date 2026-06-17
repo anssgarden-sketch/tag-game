@@ -46,7 +46,7 @@ async function getCostMultipliers() {
     ]);
 
   const cfg = {};
-  (config || []).forEach(row => { cfg[row.key] = parseFloat(row.value); });
+  config.forEach(row => { cfg[row.key] = parseFloat(row.value); });
 
   return {
     same_city:       1.0,
@@ -58,17 +58,22 @@ async function getCostMultipliers() {
 }
 
 // POST /api/intel/search
+// Single target search
 async function searchTarget(req, res) {
   try {
     const account_id = req.account.account_id;
     const { target_name, target_city_id, skill_id, is_sweep } = req.body;
 
     if (!target_city_id || !skill_id) {
-      return res.status(400).json({ error: 'Target city and skill are required' });
+      return res.status(400).json({
+        error: 'Target city and skill are required'
+      });
     }
 
     if (!is_sweep && !target_name) {
-      return res.status(400).json({ error: 'Target name is required for single target search' });
+      return res.status(400).json({
+        error: 'Target name is required for single target search'
+      });
     }
 
     // Get attacker's living character
@@ -88,17 +93,6 @@ async function searchTarget(req, res) {
       return res.status(404).json({ error: 'No living character found' });
     }
 
-    // FIX: Supabase returns joined 1-to-1 rows as arrays
-    const apRow = Array.isArray(attacker.action_points)
-      ? attacker.action_points[0]
-      : attacker.action_points;
-
-    if (!apRow) {
-      return res.status(500).json({ error: 'Action points record missing for character' });
-    }
-
-    const currentAp = apRow.current_ap;
-
     // Verify attacker has this intel skill
     const { data: hasSkill } = await supabase
       .from('character_skills')
@@ -109,7 +103,9 @@ async function searchTarget(req, res) {
       .single();
 
     if (!hasSkill) {
-      return res.status(400).json({ error: 'You do not have this Intel skill' });
+      return res.status(400).json({
+        error: 'You do not have this Intel skill'
+      });
     }
 
     // Get the skill details
@@ -123,11 +119,6 @@ async function searchTarget(req, res) {
       return res.status(400).json({ error: 'Skill not found' });
     }
 
-    // Verify it is actually an intel skill
-    if (skill.category !== 'intel') {
-      return res.status(400).json({ error: 'That skill is not an Intel skill' });
-    }
-
     // Get target city details
     const { data: targetCity } = await supabase
       .from('cities')
@@ -139,9 +130,7 @@ async function searchTarget(req, res) {
       return res.status(400).json({ error: 'Target city not found' });
     }
 
-    const attackerCity = Array.isArray(attacker.cities)
-      ? attacker.cities[0]
-      : attacker.cities;
+    const attackerCity = attacker.cities;
 
     // Check skill range covers target city
     const rangeTier = getRangeTier(attackerCity, targetCity);
@@ -159,41 +148,31 @@ async function searchTarget(req, res) {
     const apCost = Math.ceil(skill.base_ap_cost * rangeMod * sweepMod);
     const creditCost = Math.ceil(skill.base_credit_cost * rangeMod * sweepMod);
 
-    // Check AP
+    // Check attacker has enough AP
+    const currentAp = attacker.action_points.current_ap;
     if (currentAp < apCost) {
       return res.status(400).json({
         error: `Insufficient AP. Need ${apCost}, have ${currentAp}`
       });
     }
 
-    // Check credits
+    // Check attacker has enough credits
     if (attacker.credits < creditCost) {
       return res.status(400).json({
         error: `Insufficient credits. Need $${creditCost}, have $${attacker.credits}`
       });
     }
 
-    // Deduct AP
-    const { error: apUpdateError } = await supabase
+    // Deduct AP and credits
+    await supabase
       .from('action_points')
-      .update({ current_ap: currentAp - apCost, updated_at: new Date().toISOString() })
+      .update({ current_ap: currentAp - apCost })
       .eq('character_id', attacker.id);
 
-    if (apUpdateError) {
-      console.error('AP deduct error:', apUpdateError);
-      return res.status(500).json({ error: 'Failed to deduct AP' });
-    }
-
-    // Deduct credits
-    const { error: creditsUpdateError } = await supabase
+    await supabase
       .from('characters')
       .update({ credits: attacker.credits - creditCost })
       .eq('id', attacker.id);
-
-    if (creditsUpdateError) {
-      console.error('Credits deduct error:', creditsUpdateError);
-      return res.status(500).json({ error: 'Failed to deduct credits' });
-    }
 
     // Find targets in the city
     let targetQuery = supabase
@@ -204,14 +183,25 @@ async function searchTarget(req, res) {
         travel_status,
         destination_city_id,
         arrives_at,
-        cities!current_city_id(id, name, country, continent)
+        cities!current_city_id(id, name, country, continent),
+        character_skills(pool, skill_id)
       `)
       .eq('is_alive', true)
-      .neq('account_id', account_id)
-      .eq('current_city_id', target_city_id);
+      .neq('account_id', account_id);
 
-    if (!is_sweep) {
-      targetQuery = targetQuery.ilike('name', target_name.trim());
+    if (is_sweep) {
+      // Sweep -- find all characters in target city
+      // Include in-transit characters whose departure city is target city
+      targetQuery = targetQuery.or(
+        `current_city_id.eq.${target_city_id},and(travel_status.eq.in_transit,current_city_id.eq.${target_city_id})`
+      );
+    } else {
+      // Single target -- find by name
+      targetQuery = targetQuery
+        .ilike('name', target_name.trim())
+        .or(
+          `current_city_id.eq.${target_city_id},and(travel_status.eq.in_transit,current_city_id.eq.${target_city_id})`
+        );
     }
 
     const { data: potentialTargets, error: targetError } = await targetQuery;
@@ -221,11 +211,11 @@ async function searchTarget(req, res) {
       return res.status(500).json({ error: 'Search failed' });
     }
 
-    // Counter-intel check + tag each unprotected target
+    // Run counter-intel check for each potential target
     const tagDurationHours = 48;
     const expiresAt = new Date(Date.now() + tagDurationHours * 60 * 60 * 1000).toISOString();
     const taggedTargets = [];
-    let blockedCount = 0;
+    const blockedCount = { count: 0 };
 
     for (const target of potentialTargets || []) {
       // Get target's counter-intel skills
@@ -237,34 +227,36 @@ async function searchTarget(req, res) {
 
       const counterSkillIds = (counterIntelSkills || []).map(s => s.skill_id);
 
-      // Exact match required: target must have the SAME skill_id in counter_intel pool
+      // Check if target has exact counter to this intel skill
       const isBlocked = counterSkillIds.includes(skill_id);
 
       if (isBlocked) {
-        blockedCount++;
+        blockedCount.count++;
         continue;
       }
 
-      // Check for existing active tag from this attacker on this target
+      // Target is not protected -- tag them
+      // Check if already tagged by this attacker
       const { data: existingTag } = await supabase
         .from('tags')
         .select('id')
         .eq('attacker_character_id', attacker.id)
         .eq('target_character_id', target.id)
         .eq('is_active', true)
-        .maybeSingle();  // avoids error when no row found
+        .single();
 
       if (existingTag) {
+        // Refresh the tag
         await supabase
           .from('tags')
           .update({
             expires_at: expiresAt,
             tagged_in_city_id: target_city_id,
-            intel_skill_used_id: skill_id,
-            tagged_at: new Date().toISOString()
+            intel_skill_used_id: skill_id
           })
           .eq('id', existingTag.id);
       } else {
+        // Create new tag
         await supabase
           .from('tags')
           .insert({
@@ -277,10 +269,9 @@ async function searchTarget(req, res) {
           });
       }
 
-      const targetCityData = Array.isArray(target.cities) ? target.cities[0] : target.cities;
       taggedTargets.push({
         name: target.name,
-        city: targetCityData?.name,
+        city: target.cities?.name,
         is_in_transit: target.travel_status === 'in_transit'
       });
     }
@@ -300,8 +291,8 @@ async function searchTarget(req, res) {
       response.tagged = taggedTargets;
       response.tagged_count = taggedTargets.length;
     } else {
-      response.result = blockedCount > 0
-        ? 'Search complete — target protected by counter-intel'
+      response.result = blockedCount.count > 0
+        ? 'Search complete — no targets located'
         : 'No targets found in that city';
     }
 
@@ -314,6 +305,7 @@ async function searchTarget(req, res) {
 }
 
 // GET /api/intel/tags
+// Get all active tags for the attacker
 async function getMyTags(req, res) {
   try {
     const account_id = req.account.account_id;

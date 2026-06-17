@@ -6,6 +6,7 @@ router.get('/status', (req, res) => {
 
 router.use('/auth', require('./auth'));
 router.use('/character', require('./character'));
+router.use('/assassination', require('./assassination'));
 router.use('/intel', require('./intel'));
 router.use('/test', require('./test'));
 
