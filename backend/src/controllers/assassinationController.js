@@ -1,14 +1,5 @@
 const supabase = require('../services/supabase');
 
-// Range hierarchy for assassination skills
-const RANGE_LEVELS = {
-  close:  1,
-  short:  2,
-  medium: 3,
-  long:   4,
-  remote: 5
-};
-
 // Can this assassination skill reach the target given city relationship?
 // Close/Short/Medium/Long = same city only (hard cap per design doc)
 // Remote = any city
@@ -31,7 +22,7 @@ async function execute(req, res) {
     const { data: attacker, error: attackerError } = await supabase
       .from('characters')
       .select(`
-        id, name, credits, current_city_id, account_id,
+        id, name, credits, current_city_id, account_id, kill_count,
         cities!current_city_id(id, name, country),
         action_points(current_ap, max_ap)
       `)
@@ -121,7 +112,6 @@ async function execute(req, res) {
 
     // Check tag hasn't expired
     if (new Date(tag.expires_at) < new Date()) {
-      // Deactivate the expired tag
       await supabase
         .from('tags')
         .update({ is_active: false })
@@ -154,23 +144,10 @@ async function execute(req, res) {
       });
     }
 
-    // ── 8. Deduct attacker AP and credits ─────────────────────────
-    await supabase
-      .from('action_points')
-      .update({
-        current_ap: currentAp - skill.base_ap_cost,
-        updated_at: new Date().toISOString()
-      })
-      .eq('character_id', attacker.id);
-
-    await supabase
-      .from('characters')
-      .update({ credits: attacker.credits - skill.base_credit_cost })
-      .eq('id', attacker.id);
-
-    // ── 9. Check target's defensive skills ───────────────────────
-    // Exact skill match required to counter (design doc rule)
-    // Counter-attack only possible for non-remote kills, same city
+    // ── 8. Resolve outcome — PURE COMPUTATION, NO WRITES YET ───────
+    // Everything from here to the log insert is decided in memory first.
+    // Nothing is written to the DB until we know exactly what happened,
+    // so a crash before the log insert means NOTHING changed — safe to retry.
     const isRemote = skill.range === 'remote';
     const sameCityKill = attacker.current_city_id === target.current_city_id;
 
@@ -180,98 +157,64 @@ async function execute(req, res) {
 
     const isBlocked = targetDefensiveSkills.includes(skill_id);
 
-    // ── 10. Resolve outcome ───────────────────────────────────────
+    const targetApRow = Array.isArray(target.action_points)
+      ? target.action_points[0]
+      : target.action_points;
+
     let outcome;
-    let counterAttackResult = null;
+    let counterWillSucceed = false;
 
     if (isBlocked && !isRemote && sameCityKill) {
-      // Target's defensive skill exactly counters this assassination skill
-      // Target attempts counter-attack
-
-      const targetApRow = Array.isArray(target.action_points)
-        ? target.action_points[0]
-        : target.action_points;
-
       const targetHasAp = targetApRow && targetApRow.current_ap >= 1;
-      // Counter-attack costs the same as the assassination skill
       const targetHasCredits = target.credits >= skill.base_credit_cost;
 
       if (targetHasAp && targetHasCredits) {
-        // Counter-attack succeeds — attacker dies
         outcome = 'counter_attacked';
-
-        // Deduct target's AP and credits for counter
-        await supabase
-          .from('action_points')
-          .update({
-            current_ap: targetApRow.current_ap - 1,
-            updated_at: new Date().toISOString()
-          })
-          .eq('character_id', target.id);
-
-        await supabase
-          .from('characters')
-          .update({ credits: target.credits - skill.base_credit_cost })
-          .eq('id', target.id);
-
-        // Kill the attacker
-        await supabase
-          .from('characters')
-          .update({
-            is_alive: false,
-            killed_by_account_id: target.account_id,
-            killed_with_skill_id: skill_id
-          })
-          .eq('id', attacker.id);
-
-        counterAttackResult = {
-          counter_attacker: target.name,
-          attacker_killed: true
-        };
-
+        counterWillSucceed = true;
       } else {
-        // Target blocked the attempt but couldn't counter — survived
         outcome = 'survived';
       }
-
-    } else if (isBlocked && (isRemote || !sameCityKill)) {
-      // Remote kills cannot be countered even if skill matches
-      outcome = 'killed';
     } else {
-      // No counter — target dies
+      // Remote kills cannot be countered even if defense matches.
+      // No counter possible cross-city either.
       outcome = 'killed';
     }
 
-    // ── 11. Apply kill if outcome is killed ───────────────────────
-    if (outcome === 'killed') {
-      await supabase
-        .from('characters')
-        .update({
-          is_alive: false,
-          killed_by_account_id: account_id,
-          killed_with_skill_id: skill_id
-        })
-        .eq('id', target.id);
+    // ── 9. WRITE PHASE 1: deduct attacker AP/credits + log attempt ─
+    // This is the durable record of "this action happened with this outcome."
+    // If anything below this point fails, we at least know what should
+    // have occurred and can reconcile manually or via a recovery job.
+    const { error: apDeductError } = await supabase
+      .from('action_points')
+      .update({
+        current_ap: currentAp - skill.base_ap_cost,
+        updated_at: new Date().toISOString()
+      })
+      .eq('character_id', attacker.id);
 
-      // Increment attacker kill count
-      await supabase.rpc('increment_kill_count', { char_id: attacker.id })
-        .catch(() => {
-          // RPC may not exist yet — do it manually
-          return supabase
-            .from('characters')
-            .update({ kill_count: (attacker.kill_count || 0) + 1 })
-            .eq('id', attacker.id);
-        });
+    if (apDeductError) {
+      console.error('AP deduct error:', apDeductError);
+      return res.status(500).json({ error: 'Failed to deduct AP' });
     }
 
-    // ── 12. Deactivate the tag ────────────────────────────────────
+    const { error: creditDeductError } = await supabase
+      .from('characters')
+      .update({ credits: attacker.credits - skill.base_credit_cost })
+      .eq('id', attacker.id);
+
+    if (creditDeductError) {
+      console.error('Credit deduct error:', creditDeductError);
+      return res.status(500).json({ error: 'Failed to deduct credits' });
+    }
+
+    // Deactivate tag now — it's consumed regardless of outcome
     await supabase
       .from('tags')
       .update({ is_active: false })
       .eq('id', tag.id);
 
-    // ── 13. Log assassination attempt ─────────────────────────────
-    await supabase
+    // Log the attempt — this is the source of truth going forward
+    const { data: loggedAttempt, error: logError } = await supabase
       .from('assassination_attempts')
       .insert({
         attacker_character_id: attacker.id,
@@ -283,25 +226,91 @@ async function execute(req, res) {
         ap_spent: skill.base_ap_cost,
         credits_spent: skill.base_credit_cost,
         was_queued: false
+      })
+      .select('id')
+      .single();
+
+    if (logError) {
+      console.error('Attempt log error:', logError);
+      // AP/credits already spent and tag consumed at this point.
+      // Outcome is not yet applied to characters table. Surface clearly
+      // rather than silently continuing into character mutation.
+      return res.status(500).json({
+        error: 'Attempt could not be logged. AP and credits were spent but the kill was not applied. Contact support with this attacker ID: ' + attacker.id
       });
-
-    // ── 14. Write ticker event (anonymized) ───────────────────────
-    if (outcome === 'killed' || outcome === 'counter_attacked') {
-      const deadCharName = outcome === 'killed' ? target.name : attacker.name;
-      const deadCity = outcome === 'killed' ? targetCity.name : attackerCity.name;
-
-      await supabase
-        .from('ticker_events')
-        .insert({
-          event_type: 'body_found',
-          city_id: outcome === 'killed' ? target.current_city_id : attacker.current_city_id,
-          message: `An unidentified body was found in ${deadCity}.`
-        });
     }
 
-    // ── 15. Build response ────────────────────────────────────────
+    // ── 10. WRITE PHASE 2: apply consequences to characters ────────
+    // Outcome is fixed and logged. From here we just apply it.
+    let counterAttackResult = null;
+
+    if (outcome === 'killed') {
+      await supabase
+        .from('characters')
+        .update({
+          is_alive: false,
+          killed_by_account_id: account_id,
+          killed_with_skill_id: skill_id
+        })
+        .eq('id', target.id);
+
+      await supabase
+        .from('characters')
+        .update({ kill_count: (attacker.kill_count || 0) + 1 })
+        .eq('id', attacker.id);
+
+    } else if (outcome === 'counter_attacked') {
+      await supabase
+        .from('action_points')
+        .update({
+          current_ap: targetApRow.current_ap - 1,
+          updated_at: new Date().toISOString()
+        })
+        .eq('character_id', target.id);
+
+      await supabase
+        .from('characters')
+        .update({ credits: target.credits - skill.base_credit_cost })
+        .eq('id', target.id);
+
+      await supabase
+        .from('characters')
+        .update({
+          is_alive: false,
+          killed_by_account_id: target.account_id,
+          killed_with_skill_id: skill_id
+        })
+        .eq('id', attacker.id);
+
+      counterAttackResult = {
+        counter_attacker: target.name,
+        attacker_killed: true
+      };
+    }
+    // 'survived' outcome requires no further character mutation
+
+    // ── 11. Ticker event (best-effort, non-critical) ────────────────
+    if (outcome === 'killed' || outcome === 'counter_attacked') {
+      const deadCity = outcome === 'killed' ? targetCity.name : attackerCity.name;
+      const deadCityId = outcome === 'killed' ? target.current_city_id : attacker.current_city_id;
+
+      try {
+        await supabase
+          .from('ticker_events')
+          .insert({
+            event_type: 'body_found',
+            city_id: deadCityId,
+            message: `An unidentified body was found in ${deadCity}.`
+          });
+      } catch (tickerErr) {
+        console.error('Ticker event error (non-critical):', tickerErr);
+      }
+    }
+
+    // ── 12. Build response ────────────────────────────────────────
     const response = {
       outcome,
+      attempt_id: loggedAttempt.id,
       skill_used: skill.name,
       ap_spent: skill.base_ap_cost,
       credits_spent: skill.base_credit_cost,
